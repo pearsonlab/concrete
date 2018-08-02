@@ -2,14 +2,14 @@ import os
 import tensorflow as tf
 import numpy as np
 import edward as ed
-from hmm_concrete import get_model_params, HMM_gen, HMM_rec
+from concrete import get_model_params, HMM_gen, HMM_rec
 
 
 MODEL_DIR = "HMM_concrete"
-TRAINING_DATA_DIR = "/home/samyin/data/hmm_sample.npy"
+TRAINING_DATA_DIR = ""
 N_STATES = 2
 OBS_DIM = 2
-N_LAYERS = 2
+N_LAYERS = 3
 LAYER_DIM = 32
 INIT_TEMP = 1e-3
 SEED = 1234
@@ -52,24 +52,25 @@ def run_model(FLAGS):
     if not os.path.exists(FLAGS.model_dir):
         os.makedirs(FLAGS.model_dir)
 
-    temp_gen = tf.get_variable(
-    	"temperature_gen", dtype=tf.float32,
-    	initializer=FLAGS.init_temp, trainable=False)
-    temp_rec = tf.get_variable(
-    	"temperature_rec", dtype=tf.float32,
-    	initializer=FLAGS.init_temp, trainable=False)
-
-    params = get_model_params(
-    	FLAGS.n_states, FLAGS.obs_dim, FLAGS.n_layers, FLAGS.layer_dim,
-        temp_gen, temp_rec)
-
     obs = tf.placeholder(tf.float32, [None, FLAGS.obs_dim], "observations")
     data = np.load(FLAGS.train_data_dir)
 
-    gen = HMM_gen(obs, params, value=np.zeros((1, FLAGS.n_states)))
+    temp_gen = tf.get_variable(
+        "temperature_gen", dtype=tf.float32,
+        initializer=FLAGS.init_temp, trainable=False)
+    temp_rec = tf.get_variable(
+        "temperature_rec", dtype=tf.float32,
+        initializer=FLAGS.init_temp, trainable=False)
+
+    params = get_model_params(
+        FLAGS.n_states, FLAGS.obs_dim, FLAGS.n_layers, FLAGS.layer_dim,
+        temp_gen, temp_rec)
+
+    gen = HMM_gen(obs, params)
     rec = HMM_rec(obs, params)
 
-    pred_probs = tf.identity(rec.sample(), "predicted_probability")
+    pred_probs = tf.nn.softmax(rec.sample(), name="predicted_probability")
+    new_sample = tf.nn.softmax(gen.sample(), name="sample")
 
     inference = ed.KLqp({gen: rec})
     optimizer = tf.train.AdamOptimizer(FLAGS.lr)
