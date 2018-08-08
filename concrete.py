@@ -1,9 +1,8 @@
 import tensorflow as tf
 import numpy as np
-from edward.models import (MultivariateNormalTriL, RandomVariable,
-                           ExpRelaxedOneHotCategorical)
-from tensorflow.contrib.distributions import (Distribution, fill_triangular,
-                                              FULLY_REPARAMETERIZED)
+from tensorflow.contrib.distributions import (ExpRelaxedOneHotCategorical,
+                                              MultivariateNormalTriL,
+                                              fill_triangular)
 from tensorflow.contrib.keras import layers, models
 
 
@@ -31,8 +30,8 @@ def get_model_params(n_states, obs_dim, n_layers, layer_dim,
             loc = tf.get_variable(
                 "loc", [n_states, obs_dim], tf.float32,
                 tf.random_normal_initializer)
-            unc_scale_tril = tf.get_variable(
-                "unc_scale_tril",
+            scale_tril = tf.get_variable(
+                "scale_tril",
                 [n_states, obs_dim * (obs_dim + 1) / 2], tf.float32,
                 tf.random_normal_initializer)
         with tf.variable_scope("recognition"):
@@ -52,14 +51,14 @@ def get_model_params(n_states, obs_dim, n_layers, layer_dim,
         params = dict(
             K=n_states, D=obs_dim, t_gen=temp_gen, t_rec=temp_rec,
             gen_alpha_0=gen_alpha_0, gen_A=gen_A,
-            loc=loc, unc_scale_tril=unc_scale_tril,
+            loc=loc, scale_tril=scale_tril,
             rec_alpha_0=rec_alpha_0, NN=NN)
 
     return params
 
 
-class HMM_gen(RandomVariable, Distribution):
-    """Random variable class for HMM (generative model)
+class HMM_gen(object):
+    """Generative model for HMM
     """
 
     def __init__(self, observations, parameters, *args, **kwargs):
@@ -70,17 +69,21 @@ class HMM_gen(RandomVariable, Distribution):
             self.D = parameters["D"]
             self.temp = tf.identity(parameters["t_gen"], "temperature")
 
-            self.alpha_0 = parameters["gen_alpha_0"]
+            self.alpha_0 = tf.identity(parameters["gen_alpha_0"],
+                                       "initial_state_logits")
             self.prob_0 = tf.nn.softmax(
                 self.alpha_0, name="initial_state_probability")
             self.log_init = ExpRelaxedOneHotCategorical(
                 self.temp, logits=self.alpha_0, name="initial_distribution")
-            self.trans = parameters["gen_A"]
+            self.trans = tf.identity(parameters["gen_A"], "transition_matrix")
 
-            self.loc = tf.identity(parameters["loc"], name="loc")
+            self.loc = tf.identity(parameters["loc"], "loc")
             # cholesky factor of covariance matrix
-            self.scale_tril = fill_triangular(tf.nn.softplus(
-                parameters["unc_scale_tril"]), name="scale_tril")
+            self.scale_tril = fill_triangular(
+                parameters["scale_tril"], name="scale_tril")
+            # self.scale_tril = tf.add(
+            #     fill_triangular(parameters["scale_tril"]),
+            #     1e-6 * tf.eye(self.D, batch_shape=[self.K]), "scale_tril")
             self.cov = tf.matmul(
                 self.scale_tril, tf.matrix_transpose(self.scale_tril),
                 name="cov")
@@ -88,24 +91,11 @@ class HMM_gen(RandomVariable, Distribution):
                 self.loc, self.scale_tril, name="emission")
 
             self.var = [parameters["gen_alpha_0"], parameters["gen_A"],
-                        parameters["loc"], parameters["unc_scale_tril"]]
-
-        if "name" not in kwargs:
-            kwargs["name"] = name
-        if "dtype" not in kwargs:
-            kwargs["dtype"] = tf.float32
-        if "reparameterization_type" not in kwargs:
-            kwargs["reparameterization_type"] = FULLY_REPARAMETERIZED
-        if "validate_args" not in kwargs:
-            kwargs["validate_args"] = True
-        if "allow_nan_stats" not in kwargs:
-            kwargs["allow_nan_stats"] = False
+                        parameters["loc"], parameters["scale_tril"]]
 
         super(HMM_gen, self).__init__(*args, **kwargs)
 
-        self._args = (observations, parameters)
-
-    def _log_prob(self, value):
+    def log_prob(self, value):
         log_prob_0 = tf.add(
             tf.reduce_logsumexp(self.em.log_prob(self.obs[0]) + value[0]),
             self.log_init.log_prob(value[0]))
@@ -114,25 +104,25 @@ class HMM_gen(RandomVariable, Distribution):
             lambda x: tf.add(
                 tf.reduce_logsumexp(self.em.log_prob(x[0]) + x[1]),
                 ExpRelaxedOneHotCategorical(
-                    self.temp, logits=tf.squeeze(tf.matmul(
-                        self.trans, tf.reshape(x[2], [self.K, 1])))).log_prob(
-                x[1])), (self.obs[1:], value[1:], value[:-1])))
+                    self.temp, logits=tf.reshape(
+                        tf.matmul(self.trans, tf.reshape(x[2], [self.K, 1])),
+                        [self.K])).log_prob(x[1])),
+            (self.obs[1:], value[1:], value[:-1]), tf.float32))
 
         return (log_prob_0 + log_prob)
 
-    def _sample_n(self, n, seed=None):
+    def sample(self, seed=None):
         init = self.log_init.sample()
-        samp = tf.scan(
-            lambda a, _: ExpRelaxedOneHotCategorical(
-                self.temp, logits=tf.squeeze(tf.matmul(
-                    self.trans, tf.reshape(a, [self.K, 1])))).sample(),
-            self.obs[:-1], init)
+        samp = tf.scan(lambda a, _: ExpRelaxedOneHotCategorical(
+            self.temp, logits=tf.reshape(
+                tf.matmul(self.trans, tf.reshape(a, [self.K, 1])),
+                [self.K])).sample(), self.obs[:-1], init)
 
         return tf.concat([tf.reshape(init, [1, self.K]), samp], 0)
 
 
-class HMM_rec(RandomVariable, Distribution):
-    """Random variable class for HMM (recognition model)
+class HMM_rec(object):
+    """Recognition model for HMM
     """
 
     def __init__(self, observations, parameters, *args, **kwargs):
@@ -143,7 +133,8 @@ class HMM_rec(RandomVariable, Distribution):
             self.D = parameters["D"]
             self.temp = tf.identity(parameters["t_rec"], "temperature")
 
-            self.alpha_0 = parameters["rec_alpha_0"]
+            self.alpha_0 = tf.identity(parameters["rec_alpha_0"],
+                                       "initial_state_logits")
             self.log_init = ExpRelaxedOneHotCategorical(
                 self.temp, logits=self.alpha_0, name="initial_distribution")
 
@@ -151,42 +142,32 @@ class HMM_rec(RandomVariable, Distribution):
             self.NN_inputs = tf.concat(
                 [self.obs[:-1], self.obs[1:]], -1, "NN_inputs")
             self.trans = tf.reshape(
-                self.NN(self.NN_inputs), [-1, self.K, self.K], "trans_matrix")
+                self.NN(self.NN_inputs), [-1, self.K, self.K],
+                "transition_matrix")
 
             self.var = [parameters["rec_alpha_0"]] + self.NN.variables
 
-        if "name" not in kwargs:
-            kwargs["name"] = name
-        if "dtype" not in kwargs:
-            kwargs["dtype"] = tf.float32
-        if "reparameterization_type" not in kwargs:
-            kwargs["reparameterization_type"] = FULLY_REPARAMETERIZED
-        if "validate_args" not in kwargs:
-            kwargs["validate_args"] = True
-        if "allow_nan_stats" not in kwargs:
-            kwargs["allow_nan_stats"] = False
-
         super(HMM_rec, self).__init__(*args, **kwargs)
 
-        self._args = (observations, parameters)
-
-    def _log_prob(self, value):
+    def log_prob(self, value):
+        value = tf.reshape(value, [-1, self.K])
         log_prob_0 = self.log_init.log_prob(value[0])
 
         log_prob = tf.reduce_sum(tf.map_fn(
             lambda x: ExpRelaxedOneHotCategorical(
-                self.temp, logits=tf.squeeze(tf.matmul(
-                    x[0], tf.reshape(x[1], [self.K, 1])))).log_prob(x[2]),
-            (self.trans, value[:-1], value[1:])))
+                self.temp,
+                logits=tf.reshape(
+                    tf.matmul(x[0], tf.reshape(x[1], [self.K, 1])),
+                    [self.K])).log_prob(x[2]),
+            (self.trans, value[:-1], value[1:]), tf.float32))
 
         return (log_prob_0 + log_prob)
 
-    def _sample_n(self, n, seed=None):
+    def sample(self, seed=None):
         init = self.log_init.sample()
-        samp = tf.scan(
-            lambda a, x: ExpRelaxedOneHotCategorical(
-                self.temp, logits=tf.squeeze(tf.matmul(
-                    x, tf.reshape(a, [self.K, 1])))).sample(),
-            self.trans, init)
+        samp = tf.scan(lambda a, x: ExpRelaxedOneHotCategorical(
+            self.temp, logits=tf.reshape(
+                tf.matmul(x, tf.reshape(a, [self.K, 1])),
+                [self.K])).sample(), self.trans, init)
 
         return tf.concat([tf.reshape(init, [1, self.K]), samp], 0)
