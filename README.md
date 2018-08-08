@@ -16,7 +16,7 @@ TensorFlow implementation of variational inference for Hidden Markov Model(HMM) 
 - Section 2.2 & 3.2 of [Categorical Reparameterization with Gumbel-Softmax](https://arxiv.org/abs/1611.01144)
     - Straight-Through Gumbel-Softmax (Figure 2)
     - Score Function / REINFORCE & control variates
-- One-step further: [REBAR: Low-variance, unbiased gradient estimates for discrete latent variable models](https://arxiv.org/abs/1703.07370)
+- Relevant papers: [REBAR: Low-variance, unbiased gradient estimates for discrete latent variable models](https://arxiv.org/abs/1703.07370), [Backpropagation through the Void: Optimizing control variates for black-box gradient estimation](https://arxiv.org/abs/1711.00123), [ARM: Augment-REINFORCE-Merge Gradient for Discrete Latent Variable Models](https://arxiv.org/abs/1807.11143)
 
 ## Experiments
-- Gaussian observations, K = 2, N = 500, fixed temperature
+- Gaussian observations, K = 2, N = 500, fixed temperature & exponential decay
